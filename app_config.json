@@ -1,0 +1,18 @@
+{
+  "max_single_input_chars": 1000,
+  "max_batch_input_chars": 2000,
+  "max_batch_lines": 25,
+  "max_hourly_synthesis_units": 100,
+  "rate_limit_window_seconds": 3600,
+  "min_seconds_between_requests": 2,
+  "enable_synthesis_cache": true,
+  "synthesis_cache_ttl_seconds": 604800,
+  "synthesis_cache_max_entries": 500,
+  "synthesis_cache_max_total_bytes": 209715200,
+  "enable_auth": true,
+  "auth_db_path": "",
+  "bootstrap_admin_username": "",
+  "bootstrap_admin_password": "",
+  "rate_limit_db_path": ".rate_limit.sqlite",
+  "max_pronunciation_mappings": 20
+}
