@@ -1,17 +1,20 @@
 # Streamlit Cloud Deployment Checklist
 
 ## 1) Security Before Push
+
 - Keep secrets out of git.
 - Ensure `app_config.json` has empty bootstrap values.
 - Set credentials only in Streamlit Cloud app secrets.
 - If any secret was previously exposed, rotate it before deploy.
 
 ## 2) Required Streamlit Cloud Secrets
+
 Add these in app settings -> Secrets:
 
 ```toml
 AZURE_SPEECH_KEY = "<your-azure-speech-key>"
 AZURE_SPEECH_ENDPOINT = "https://<your-region>.cognitiveservices.azure.com"
+DATABASE_URL = "postgresql://tts_app:<password>@<pooler-host>:6543/postgres?sslmode=require"
 
 # Optional first-run admin bootstrap
 TTS_BOOTSTRAP_ADMIN_USERNAME = "admin"
@@ -19,14 +22,17 @@ TTS_BOOTSTRAP_ADMIN_PASSWORD = "<strong-random-password>"
 ```
 
 ## 3) Git Setup
+
 ```bash
 git init
 git add .
 git status
 ```
+
 Verify `.streamlit/secrets.toml` is NOT staged.
 
 ## 4) Deploy
+
 - Push to a private GitHub repository.
 - In Streamlit Community Cloud, create a new app.
 - Repo: your private repo
@@ -34,6 +40,7 @@ Verify `.streamlit/secrets.toml` is NOT staged.
 - Main file path: `app.py`
 
 ## 5) Smoke Tests
+
 - Login gate appears when auth is enabled.
 - Admin can open Admin page and manage users.
 - Single WAV synthesis works.
@@ -42,5 +49,6 @@ Verify `.streamlit/secrets.toml` is NOT staged.
 - Quota and burst guard messages work.
 
 ## Notes
-- Current auth/metrics/rate-limit storage uses local SQLite.
-- On cloud restart/redeploy, local state may reset.
+
+- With `DATABASE_URL` set, auth/metrics/rate-limit/cache persist in Postgres.
+- Without `DATABASE_URL`, the app falls back to local SQLite.

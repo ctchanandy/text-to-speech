@@ -16,6 +16,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 from passlib.context import CryptContext
 
+try:
+    import psycopg
+except ImportError:
+    psycopg = None
+
 VOICE_OPTIONS = [
     {
         "label": "Cantonese (HK) - Male - WanLung",
@@ -150,6 +155,45 @@ def get_config_value(name: str) -> str:
     if secret_value:
         return str(secret_value).strip()
     return os.getenv(name, "").strip()
+
+
+DATABASE_URL = get_config_value("DATABASE_URL")
+USE_POSTGRES = DATABASE_URL.lower().startswith(("postgres://", "postgresql://"))
+
+
+class DbConnection:
+    def __init__(self, raw_connection: Any, use_postgres: bool):
+        self._raw = raw_connection
+        self._use_postgres = use_postgres
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> Any:
+        if self._use_postgres:
+            return self._raw.execute(query.replace("?", "%s"), params)
+        return self._raw.execute(query, params)
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def close(self) -> None:
+        self._raw.close()
+
+
+def db_connect(local_db_path: str) -> DbConnection:
+    if USE_POSTGRES:
+        if psycopg is None:
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg is not installed. "
+                "Add psycopg[binary] to requirements.txt."
+            )
+        return DbConnection(psycopg.connect(DATABASE_URL), use_postgres=True)
+
+    return DbConnection(sqlite3.connect(local_db_path), use_postgres=False)
+
+
+def db_bool(value: bool) -> bool | int:
+    if USE_POSTGRES:
+        return value
+    return 1 if value else 0
 
 
 def build_speech_config() -> tuple[speechsdk.SpeechConfig | None, str | None]:
@@ -467,15 +511,19 @@ def build_synthesis_cache_key(
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def ensure_synthesis_cache_table(conn: sqlite3.Connection) -> None:
+def ensure_synthesis_cache_table(conn: DbConnection) -> None:
+    if USE_POSTGRES:
+        return
+
+    audio_type = "BYTEA" if USE_POSTGRES else "BLOB"
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS synthesis_cache (
             cache_key TEXT PRIMARY KEY,
             created_ts REAL NOT NULL,
             last_access_ts REAL NOT NULL,
             size_bytes INTEGER NOT NULL,
-            audio BLOB NOT NULL
+            audio {audio_type} NOT NULL
         )
         """
     )
@@ -487,7 +535,7 @@ def ensure_synthesis_cache_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def cleanup_synthesis_cache(conn: sqlite3.Connection) -> None:
+def cleanup_synthesis_cache(conn: DbConnection) -> None:
     now = time.time()
     expiry_cutoff = now - SYNTHESIS_CACHE_TTL_SECONDS
     conn.execute(
@@ -525,7 +573,7 @@ def get_cached_audio(cache_key: str) -> bytes | None:
     now = time.time()
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(RATE_LIMIT_DB_PATH)
+        conn = db_connect(RATE_LIMIT_DB_PATH)
         try:
             ensure_synthesis_cache_table(conn)
             cleanup_synthesis_cache(conn)
@@ -543,7 +591,10 @@ def get_cached_audio(cache_key: str) -> bytes | None:
                 (now, cache_key),
             )
             conn.commit()
-            return row[0]
+            audio_value = row[0]
+            if isinstance(audio_value, memoryview):
+                return bytes(audio_value)
+            return audio_value
         finally:
             conn.close()
 
@@ -557,7 +608,7 @@ def cache_audio(cache_key: str, audio_data: bytes) -> None:
     now = time.time()
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(RATE_LIMIT_DB_PATH)
+        conn = db_connect(RATE_LIMIT_DB_PATH)
         try:
             ensure_synthesis_cache_table(conn)
             conn.execute(
@@ -577,14 +628,20 @@ def cache_audio(cache_key: str, audio_data: bytes) -> None:
             conn.close()
 
 
-def ensure_auth_tables(conn: sqlite3.Connection) -> None:
+def ensure_auth_tables(conn: DbConnection) -> None:
+    if USE_POSTGRES:
+        return
+
+    is_active_type = "BOOLEAN" if USE_POSTGRES else "INTEGER"
+    is_active_default = "TRUE" if USE_POSTGRES else "1"
+
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
+            is_active {is_active_type} NOT NULL DEFAULT {is_active_default},
             created_ts REAL NOT NULL,
             updated_ts REAL NOT NULL
         )
@@ -613,7 +670,7 @@ def ensure_auth_schema() -> None:
         return
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             conn.commit()
@@ -634,11 +691,12 @@ def ensure_bootstrap_admin() -> None:
         return
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             row = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1"
+                "SELECT COUNT(*) FROM users WHERE role = ? AND is_active = ?",
+                ("admin", db_bool(True)),
             ).fetchone()
             admin_count = int(row[0]) if row else 0
             if admin_count > 0:
@@ -647,12 +705,19 @@ def ensure_bootstrap_admin() -> None:
             now = time.time()
             conn.execute(
                 """
-                INSERT OR REPLACE INTO users (username, password_hash, role, is_active, created_ts, updated_ts)
-                VALUES (?, ?, 'admin', 1, ?, ?)
+                INSERT INTO users (username, password_hash, role, is_active, created_ts, updated_ts)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    password_hash = excluded.password_hash,
+                    role = excluded.role,
+                    is_active = excluded.is_active,
+                    updated_ts = excluded.updated_ts
                 """,
                 (
                     bootstrap_user,
                     PWD_CONTEXT.hash(bootstrap_pass),
+                    "admin",
+                    db_bool(True),
                     now,
                     now,
                 ),
@@ -664,7 +729,7 @@ def ensure_bootstrap_admin() -> None:
 
 def list_users() -> list[dict[str, Any]]:
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             rows = conn.execute(
@@ -699,7 +764,7 @@ def create_user(username: str, password: str, role: str = "user") -> tuple[bool,
 
     now = time.time()
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             existing = conn.execute(
@@ -712,9 +777,9 @@ def create_user(username: str, password: str, role: str = "user") -> tuple[bool,
             conn.execute(
                 """
                 INSERT INTO users (username, password_hash, role, is_active, created_ts, updated_ts)
-                VALUES (?, ?, ?, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user, PWD_CONTEXT.hash(password), role, now, now),
+                (user, PWD_CONTEXT.hash(password), role, db_bool(True), now, now),
             )
             conn.commit()
             return True, "User created successfully."
@@ -731,7 +796,7 @@ def set_user_password(username: str, new_password: str) -> tuple[bool, str]:
 
     now = time.time()
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             row = conn.execute(
@@ -758,7 +823,7 @@ def set_user_active(username: str, is_active: bool) -> tuple[bool, str]:
 
     now = time.time()
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             row = conn.execute(
@@ -770,7 +835,7 @@ def set_user_active(username: str, is_active: bool) -> tuple[bool, str]:
 
             conn.execute(
                 "UPDATE users SET is_active = ?, updated_ts = ? WHERE username = ?",
-                (1 if is_active else 0, now, user),
+                (db_bool(is_active), now, user),
             )
             conn.commit()
             return True, "User status updated."
@@ -784,7 +849,7 @@ def authenticate_user(username: str, password: str) -> tuple[bool, str, str | No
         return False, "Username and password are required.", None
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             row = conn.execute(
@@ -823,7 +888,7 @@ def upsert_user_metrics(
     now = time.time()
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             conn.execute(
@@ -869,7 +934,7 @@ def upsert_user_metrics(
 
 def get_user_metrics_rows() -> list[dict[str, Any]]:
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(AUTH_DB_PATH)
+        conn = db_connect(AUTH_DB_PATH)
         try:
             ensure_auth_tables(conn)
             rows = conn.execute(
@@ -997,7 +1062,10 @@ def get_client_identifier() -> str:
     return sha256(raw_client.encode("utf-8")).hexdigest()
 
 
-def ensure_rate_limit_table(conn: sqlite3.Connection) -> None:
+def ensure_rate_limit_table(conn: DbConnection) -> None:
+    if USE_POSTGRES:
+        return
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS usage_events (
@@ -1009,7 +1077,10 @@ def ensure_rate_limit_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def ensure_burst_guard_table(conn: sqlite3.Connection) -> None:
+def ensure_burst_guard_table(conn: DbConnection) -> None:
+    if USE_POSTGRES:
+        return
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS request_attempts (
@@ -1027,7 +1098,7 @@ def check_burst_guard(client_id: str) -> tuple[bool, str | None]:
     now = time.time()
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(RATE_LIMIT_DB_PATH)
+        conn = db_connect(RATE_LIMIT_DB_PATH)
         try:
             ensure_burst_guard_table(conn)
             conn.execute(
@@ -1065,7 +1136,7 @@ def consume_quota(client_id: str, units: int) -> tuple[bool, int, str | None]:
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
 
     with RATE_LIMIT_LOCK:
-        conn = sqlite3.connect(RATE_LIMIT_DB_PATH)
+        conn = db_connect(RATE_LIMIT_DB_PATH)
         try:
             ensure_rate_limit_table(conn)
 
