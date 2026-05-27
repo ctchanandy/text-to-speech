@@ -1458,6 +1458,9 @@ def run_main_page() -> None:
     ):
         st.session_state["is_processing"] = True
         st.session_state["run_requested"] = True
+        # Trigger a rerun so the button is immediately rendered as disabled
+        # before the potentially long synthesis work starts.
+        st.rerun()
 
     if st.session_state["run_requested"]:
         metric_username = st.session_state.get("auth_username", "")
