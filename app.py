@@ -906,14 +906,14 @@ def upsert_user_metrics(
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(username) DO UPDATE SET
-                    request_count = request_count + excluded.request_count,
-                    cache_hits = cache_hits + excluded.cache_hits,
-                    cache_misses = cache_misses + excluded.cache_misses,
-                    clips_generated = clips_generated + excluded.clips_generated,
-                    chars_processed = chars_processed + excluded.chars_processed,
-                    error_count = error_count + excluded.error_count,
-                    last_request_ts = excluded.last_request_ts,
-                    updated_ts = excluded.updated_ts
+                    request_count = user_metrics.request_count + EXCLUDED.request_count,
+                    cache_hits = user_metrics.cache_hits + EXCLUDED.cache_hits,
+                    cache_misses = user_metrics.cache_misses + EXCLUDED.cache_misses,
+                    clips_generated = user_metrics.clips_generated + EXCLUDED.clips_generated,
+                    chars_processed = user_metrics.chars_processed + EXCLUDED.chars_processed,
+                    error_count = user_metrics.error_count + EXCLUDED.error_count,
+                    last_request_ts = EXCLUDED.last_request_ts,
+                    updated_ts = EXCLUDED.updated_ts
                 """,
                 (
                     user,
@@ -1603,15 +1603,18 @@ def run_main_page() -> None:
                     )
         finally:
             if ENABLE_AUTH and metric_username:
-                upsert_user_metrics(
-                    username=metric_username,
-                    requests=metric_requests,
-                    cache_hits=int(st.session_state.get("cache_hits", 0)),
-                    cache_misses=int(st.session_state.get("cache_misses", 0)),
-                    clips_generated=metric_clips,
-                    chars_processed=metric_chars,
-                    errors=metric_errors,
-                )
+                try:
+                    upsert_user_metrics(
+                        username=metric_username,
+                        requests=metric_requests,
+                        cache_hits=int(st.session_state.get("cache_hits", 0)),
+                        cache_misses=int(st.session_state.get("cache_misses", 0)),
+                        clips_generated=metric_clips,
+                        chars_processed=metric_chars,
+                        errors=metric_errors,
+                    )
+                except Exception as exc:
+                    st.warning(f"Usage metrics update failed: {exc}")
             st.session_state["run_requested"] = False
             st.session_state["is_processing"] = False
 
