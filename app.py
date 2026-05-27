@@ -65,9 +65,10 @@ DEFAULT_APP_CONFIG = {
     "rate_limit_db_path": ".rate_limit.sqlite",
     "max_pronunciation_mappings": 40,
     "enable_synthesis_cache": True,
-    "synthesis_cache_ttl_seconds": 604800,
-    "synthesis_cache_max_entries": 500,
-    "synthesis_cache_max_total_bytes": 209715200,
+    "synthesis_cache_ttl_seconds": 86400,
+    "synthesis_cache_max_entries": 120,
+    "synthesis_cache_max_total_bytes": 26214400,
+    "synthesis_cache_max_audio_bytes": 786432,
     "enable_auth": True,
     "auth_db_path": "",
     "bootstrap_admin_username": "",
@@ -139,6 +140,7 @@ ENABLE_SYNTHESIS_CACHE = bool_config("enable_synthesis_cache", True)
 SYNTHESIS_CACHE_TTL_SECONDS = int_config("synthesis_cache_ttl_seconds", 1)
 SYNTHESIS_CACHE_MAX_ENTRIES = int_config("synthesis_cache_max_entries", 1)
 SYNTHESIS_CACHE_MAX_TOTAL_BYTES = int_config("synthesis_cache_max_total_bytes", 1024)
+SYNTHESIS_CACHE_MAX_AUDIO_BYTES = int_config("synthesis_cache_max_audio_bytes", 1024)
 
 ENABLE_AUTH = bool_config("enable_auth", True)
 AUTH_DB_PATH = str(APP_CONFIG.get("auth_db_path", "")).strip() or RATE_LIMIT_DB_PATH
@@ -601,6 +603,8 @@ def get_cached_audio(cache_key: str) -> bytes | None:
 
 def cache_audio(cache_key: str, audio_data: bytes) -> None:
     if not ENABLE_SYNTHESIS_CACHE:
+        return
+    if len(audio_data) > SYNTHESIS_CACHE_MAX_AUDIO_BYTES:
         return
     if len(audio_data) > SYNTHESIS_CACHE_MAX_TOTAL_BYTES:
         return
@@ -1450,7 +1454,7 @@ def run_main_page() -> None:
     if st.button(
         "Convert to Speech",
         type="primary",
-        disabled=st.session_state["is_processing"],
+        disabled=st.session_state["is_processing"] or st.session_state["run_requested"],
     ):
         st.session_state["is_processing"] = True
         st.session_state["run_requested"] = True

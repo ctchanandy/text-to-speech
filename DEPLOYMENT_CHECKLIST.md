@@ -52,3 +52,22 @@ Verify `.streamlit/secrets.toml` is NOT staged.
 
 - With `DATABASE_URL` set, auth/metrics/rate-limit/cache persist in Postgres.
 - Without `DATABASE_URL`, the app falls back to local SQLite.
+
+## Optional: Manual Cache Cleanup SQL (Supabase)
+
+Use this in Supabase SQL Editor if you need to reclaim storage immediately:
+
+```sql
+-- Remove cache entries older than 24 hours
+DELETE FROM public.synthesis_cache
+WHERE last_access_ts < EXTRACT(EPOCH FROM NOW()) - 86400;
+
+-- Keep only the 120 most recently accessed entries
+DELETE FROM public.synthesis_cache
+WHERE cache_key IN (
+	SELECT cache_key
+	FROM public.synthesis_cache
+	ORDER BY last_access_ts DESC
+	OFFSET 120
+);
+```
